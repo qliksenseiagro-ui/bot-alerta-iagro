@@ -2,7 +2,7 @@ name: Alerta IAGRO Telegram
 
 on:
   schedule:
-    - cron: "*/15 6-23 * * *"
+    - cron: '*/15 * * * *' 
   workflow_dispatch:
 
 jobs:
