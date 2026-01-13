@@ -38,6 +38,6 @@ jobs:
         run: |
           git config user.name "github-actions"
           git config user.email "actions@github.com"
-          git add estado/ultimo_arquivo.txt
+          git add ultimo_arquivo.txt
           git commit -m "Atualiza ultimo arquivo processado" || echo "Nada a commitar"
           git push
