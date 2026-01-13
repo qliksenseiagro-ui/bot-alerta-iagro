@@ -1,7 +1,9 @@
 import os
+import json
 import asyncio
-from telegram import Bot
-from telegram import Update
+import pandas as pd
+from dotenv import load_dotenv
+from telegram import Bot, Update
 from telegram.ext import (
     ApplicationBuilder,
     CommandHandler,
@@ -9,25 +11,25 @@ from telegram.ext import (
     ContextTypes,
     filters
 )
-
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
-import pandas as pd
+
+# Carrega variáveis do arquivo .env
+load_dotenv()
 
 # ======================================================
-# CONFIGURAÇÕES
+# CONFIGURAÇÕES (Variáveis de Ambiente)
 # ======================================================
-
-TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
-GOOGLE_DRIVE_FOLDER_ID = os.environ.get("GOOGLE_DRIVE_FOLDER_ID")
-
-SERVICE_ACCOUNT_FILE = "service_account.json"
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
+GOOGLE_DRIVE_FOLDER_ID = os.getenv("GOOGLE_DRIVE_FOLDER_ID")
+# O JSON da Service Account pode vir de uma variável ou de um arquivo real
+GOOGLE_SERVICE_ACCOUNT_JSON = os.getenv("GOOGLE_SERVICE_ACCOUNT")
 
 ESTADO_ARQUIVO = "ultimo_arquivo.txt"
 USUARIOS_ARQUIVO = "usuarios.txt"
 
 # ======================================================
-# ESTADO
+# GESTÃO DE ARQUIVOS LOCAIS
 # ======================================================
 
 def ler_ultimo_arquivo():
@@ -36,26 +38,25 @@ def ler_ultimo_arquivo():
     with open(ESTADO_ARQUIVO, "r") as f:
         return f.read().strip()
 
-
 def salvar_ultimo_arquivo(file_id):
     with open(ESTADO_ARQUIVO, "w") as f:
         f.write(file_id)
-
 
 def carregar_usuarios():
     usuarios = {}
     if not os.path.exists(USUARIOS_ARQUIVO):
         return usuarios
-
     with open(USUARIOS_ARQUIVO, "r") as f:
         for linha in f:
-            chat_id, telefone, ativo = linha.strip().split(";")
-            usuarios[telefone] = {
-                "chat_id": int(chat_id),
-                "ativo": ativo == "1"
-            }
+            if ";" in linha:
+                parts = linha.strip().split(";")
+                if len(parts) == 3:
+                    chat_id, telefone, ativo = parts
+                    usuarios[telefone] = {
+                        "chat_id": int(chat_id),
+                        "ativo": ativo == "1"
+                    }
     return usuarios
-
 
 def salvar_usuarios(usuarios):
     with open(USUARIOS_ARQUIVO, "w") as f:
@@ -64,75 +65,118 @@ def salvar_usuarios(usuarios):
             f.write(f"{dados['chat_id']};{telefone};{ativo}\n")
 
 # ======================================================
-# GOOGLE DRIVE
+# INTEGRAÇÃO GOOGLE DRIVE
 # ======================================================
-
-import json
-from google.oauth2 import service_account
 
 def obter_drive_service():
-    info = json.loads(os.environ["GOOGLE_SERVICE_ACCOUNT"])
-    creds = service_account.Credentials.from_service_account_info(
-        info,
-        scopes=["https://www.googleapis.com/auth/drive.readonly"]
-    )
+    # Tenta carregar do JSON na variável de ambiente, se falhar, tenta arquivo físico
+    try:
+        info = json.loads(GOOGLE_SERVICE_ACCOUNT_JSON)
+        creds = service_account.Credentials.from_service_account_info(
+            info, scopes=["https://www.googleapis.com/auth/drive.readonly"]
+        )
+    except Exception:
+        # Fallback para arquivo físico caso prefira deixar o service_account.json na pasta
+        creds = service_account.Credentials.from_service_account_file(
+            "service_account.json", scopes=["https://www.googleapis.com/auth/drive.readonly"]
+        )
     return build("drive", "v3", credentials=creds)
 
+async def enviar_alertas(context: ContextTypes.DEFAULT_TYPE = None):
+    """Função que verifica o Drive e envia mensagens"""
+    print("🔎 Verificando Google Drive...")
+    try:
+        service = obter_drive_service()
+        ultimo_processado = ler_ultimo_arquivo()
 
+        # Busca o arquivo mais recente chamado AlertaIAGRO.xlsx
+        query = f"'{GOOGLE_DRIVE_FOLDER_ID}' in parents and name='AlertaIAGRO.xlsx' and trashed=false"
+        r = service.files().list(
+            q=query,
+            orderBy="createdTime desc",
+            pageSize=1,
+            fields="files(id, name, createdTime)"
+        ).execute()
 
-def obter_ultimo_arquivo_drive():
-    service = obter_drive_service()
-    r = service.files().list(
-        q=f"'{GOOGLE_DRIVE_FOLDER_ID}' in parents and name='AlertaIAGRO.xlsx'",
-        orderBy="createdTime desc",
-        pageSize=1,
-        fields="files(id, name, createdTime)"
-    ).execute()
+        arquivos = r.get("files", [])
+        if not arquivos:
+            print("ℹ️ Nenhum arquivo encontrado no Drive.")
+            return
 
-    arquivos = r.get("files", [])
-    return arquivos[0] if arquivos else None
+        arquivo = arquivos[0]
+        if arquivo["id"] == ultimo_processado:
+            print(f"ℹ️ Arquivo {arquivo['id']} já foi processado anteriormente.")
+            return
 
+        # Download
+        print(f"📥 Baixando novo arquivo: {arquivo['name']}...")
+        request = service.files().get_media(fileId=arquivo["id"])
+        with open("alerta.xlsx", "wb") as f:
+            f.write(request.execute())
 
-def baixar_arquivo(file_id):
-    service = obter_drive_service()
-    request = service.files().get_media(fileId=file_id)
-    with open("alerta.xlsx", "wb") as f:
-        f.write(request.execute())
+        # Processamento Excel
+        df = pd.read_excel("alerta.xlsx")
+        usuarios = carregar_usuarios()
+        
+        # Se for chamado via job_queue, o bot está no context. Se manual, usa o token
+        bot = context.bot if context else Bot(token=TELEGRAM_TOKEN)
+
+        envios_sucesso = 0
+        for _, linha in df.iterrows():
+            telefone = str(linha["Fone"]).strip()
+            texto = str(linha["Texto"]).strip()
+
+            if telefone in usuarios and usuarios[telefone]["ativo"]:
+                try:
+                    await bot.send_message(
+                        chat_id=usuarios[telefone]["chat_id"],
+                        text=texto,
+                        parse_mode="Markdown"
+                    )
+                    envios_sucesso += 1
+                except Exception as e:
+                    print(f"❌ Erro ao enviar para {telefone}: {e}")
+
+        salvar_ultimo_arquivo(arquivo["id"])
+        print(f"✅ Processamento concluído. {envios_sucesso} alertas enviados.")
+
+    except Exception as e:
+        print(f"💥 Erro crítico no loop de alertas: {e}")
 
 # ======================================================
-# TELEGRAM — HANDLERS
+# HANDLERS DO TELEGRAM
 # ======================================================
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = (
         "👋 *Bem-vindo ao Bot de Alertas IAGRO*\n\n"
         "Envie seu telefone no formato:\n"
-        "`67999999999`\n\n"
-        "❌ Para parar alertas, envie:\n"
-        "`/parar`"
+        "`67999999999` (apenas números)\n\n"
+        "❌ Para parar os alertas, envie: /parar"
     )
     await update.message.reply_text(msg, parse_mode="Markdown")
-
 
 async def parar(update: Update, context: ContextTypes.DEFAULT_TYPE):
     usuarios = carregar_usuarios()
     chat_id = update.message.chat_id
+    encontrado = False
 
     for tel in usuarios:
         if usuarios[tel]["chat_id"] == chat_id:
             usuarios[tel]["ativo"] = False
-            salvar_usuarios(usuarios)
-            await update.message.reply_text("🔕 Alertas desativados.")
-            return
-
-    await update.message.reply_text("⚠️ Você não estava cadastrado.")
-
+            encontrado = True
+    
+    if encontrado:
+        salvar_usuarios(usuarios)
+        await update.message.reply_text("🔕 Alertas desativados com sucesso.")
+    else:
+        await update.message.reply_text("⚠️ Você não está cadastrado ou já está inativo.")
 
 async def receber_telefone(update: Update, context: ContextTypes.DEFAULT_TYPE):
     telefone = update.message.text.strip()
 
     if not telefone.isdigit() or len(telefone) < 10:
-        await update.message.reply_text("❌ Envie no formato: 67999999999")
+        await update.message.reply_text("❌ Formato inválido. Envie apenas números com DDD (ex: 67999998888).")
         return
 
     usuarios = carregar_usuarios()
@@ -141,68 +185,28 @@ async def receber_telefone(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "ativo": True
     }
     salvar_usuarios(usuarios)
-
-    await update.message.reply_text("✅ Cadastro realizado com sucesso!")
-
-# ======================================================
-# ENVIO DE ALERTAS (BATCH)
-# ======================================================
-
-async def enviar_alertas():
-    print("🔎 Verificando Google Drive...")
-
-    ultimo_processado = ler_ultimo_arquivo()
-    arquivo = obter_ultimo_arquivo_drive()
-
-    if not arquivo:
-        print("ℹ️ Nenhum arquivo encontrado.")
-        return
-
-    if arquivo["id"] == ultimo_processado:
-        print("ℹ️ Arquivo já processado.")
-        return
-
-    baixar_arquivo(arquivo["id"])
-    df = pd.read_excel("alerta.xlsx")
-
-    usuarios = carregar_usuarios()
-    bot = Bot(token=TELEGRAM_TOKEN)
-
-    for _, linha in df.iterrows():
-        telefone = str(linha["Fone"]).strip()
-        texto = str(linha["Texto"]).strip()
-
-        if telefone in usuarios and usuarios[telefone]["ativo"]:
-            try:
-                await bot.send_message(
-                    chat_id=usuarios[telefone]["chat_id"],
-                    text=texto
-                )
-            except Exception as e:
-                print(f"Erro envio {telefone}: {e}")
-
-    salvar_ultimo_arquivo(arquivo["id"])
-    print("✅ Alertas enviados.")
+    await update.message.reply_text(f"✅ Telefone {telefone} cadastrado! Você receberá alertas assim que o sistema detectar novos arquivos.")
 
 # ======================================================
-# MAIN
+# INICIALIZAÇÃO
 # ======================================================
 
-async def main():
+if __name__ == "__main__":
+    if not TELEGRAM_TOKEN:
+        print("❌ ERRO: TELEGRAM_TOKEN não configurado no .env")
+        exit(1)
+
+    print("🤖 Iniciando Bot...")
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
 
+    # Handlers
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("parar", parar))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, receber_telefone))
 
-    # Execução batch (GitHub Actions)
-    await enviar_alertas()
+    # Agendamento: Verifica o Drive a cada 15 minutos (900 segundos)
+    # first=10 faz a primeira verificação 10 segundos após ligar o bot
+    app.job_queue.run_repeating(enviar_alertas, interval=900, first=10)
 
-
-if __name__ == "__main__":
-    asyncio.run(main())
-
-print("TOKEN OK:", bool(os.environ.get("TELEGRAM_TOKEN")))
-print("GOOGLE JSON OK:", bool(os.environ.get("GOOGLE_SERVICE_ACCOUNT")))
-print("PASTA OK:", os.environ.get("GOOGLE_DRIVE_FOLDER_ID"))
-
+    print("📡 Bot online. Aguardando mensagens e verificando Drive a cada 15 min...")
+    app.run_polling()
