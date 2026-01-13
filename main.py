@@ -201,3 +201,8 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
+print("TOKEN OK:", bool(os.environ.get("TELEGRAM_TOKEN")))
+print("GOOGLE JSON OK:", bool(os.environ.get("GOOGLE_SERVICE_ACCOUNT")))
+print("PASTA OK:", os.environ.get("GOOGLE_DRIVE_FOLDER_ID"))
+
