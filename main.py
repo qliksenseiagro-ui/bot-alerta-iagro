@@ -67,12 +67,17 @@ def salvar_usuarios(usuarios):
 # GOOGLE DRIVE
 # ======================================================
 
+import json
+from google.oauth2 import service_account
+
 def obter_drive_service():
-    creds = service_account.Credentials.from_service_account_file(
-        SERVICE_ACCOUNT_FILE,
+    info = json.loads(os.environ["GOOGLE_SERVICE_ACCOUNT"])
+    creds = service_account.Credentials.from_service_account_info(
+        info,
         scopes=["https://www.googleapis.com/auth/drive.readonly"]
     )
     return build("drive", "v3", credentials=creds)
+
 
 
 def obter_ultimo_arquivo_drive():
