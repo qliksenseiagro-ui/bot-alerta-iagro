@@ -1,88 +1,79 @@
 import os
-import pandas as pd
-from telegram import Bot
+import asyncio
+from telegram import Update, Bot
+from telegram.ext import (
+    ApplicationBuilder,
+    CommandHandler,
+    MessageHandler,
+    ContextTypes,
+    filters
+)
+
+from google.oauth2 import service_account
 from googleapiclient.discovery import build
-from google.oauth2.service_account import Credentials
+import pandas as pd
 
-# ================= CONFIG =================
-BOT_TOKEN = os.environ["BOT_TOKEN"]
-PASTA_ALERTAS = "1fFBvjaidKEpHY3VrK_xsi-dcYrNOefAk"
-ARQUIVO_NOME = "AlertaIAGRO.xlsx"
-ESTADO_ARQUIVO = "estado/ultimo_arquivo.txt"
+# =========================================================
+# CONFIGURAÇÕES
+# =========================================================
 
-SCOPES = ["https://www.googleapis.com/auth/drive.readonly"]
-# =========================================
+TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 
-bot = Bot(token=BOT_TOKEN)
+GOOGLE_DRIVE_FOLDER_ID = os.environ.get("GOOGLE_DRIVE_FOLDER_ID")
+SERVICE_ACCOUNT_FILE = "service_account.json"
+
+ESTADO_DIR = "estado"
+ESTADO_ARQUIVO = os.path.join(ESTADO_DIR, "ultimo_arquivo.txt")
+
+USUARIOS_ARQUIVO = os.path.join(ESTADO_DIR, "usuarios.txt")
+
+# =========================================================
+# UTILIDADES DE ESTADO
+# =========================================================
+
+def garantir_pasta_estado():
+    os.makedirs(ESTADO_DIR, exist_ok=True)
 
 
-def get_drive_service():
-    creds = Credentials.from_service_account_file(
-        "service_account.json", scopes=SCOPES
-    )
-    return build("drive", "v3", credentials=creds)
-
-
-def get_ultimo_id_processado():
+def ler_ultimo_arquivo():
     if not os.path.exists(ESTADO_ARQUIVO):
         return None
     with open(ESTADO_ARQUIVO, "r") as f:
-        return f.read().strip() or None
+        return f.read().strip()
 
 
-def salvar_ultimo_id(file_id):
+def salvar_ultimo_arquivo(file_id):
+    garantir_pasta_estado()
     with open(ESTADO_ARQUIVO, "w") as f:
         f.write(file_id)
 
 
-def get_arquivo_mais_recente(service):
-    query = (
-        f"'{PASTA_ALERTAS}' in parents and "
-        f"name='{ARQUIVO_NOME}' and trashed=false"
-    )
+def carregar_usuarios():
+    garantir_pasta_estado()
+    usuarios = {}
+    if not os.path.exists(USUARIOS_ARQUIVO):
+        return usuarios
 
-    results = service.files().list(
-        q=query,
-        orderBy="createdTime desc",
-        pageSize=1,
-        fields="files(id, createdTime)"
-    ).execute()
-
-    files = results.get("files", [])
-    return files[0] if files else None
-
-
-def baixar_excel(service, file_id):
-    request = service.files().get_media(fileId=file_id)
-    with open("alerta.xlsx", "wb") as f:
-        f.write(request.execute())
+    with open(USUARIOS_ARQUIVO, "r") as f:
+        for linha in f:
+            chat_id, telefone, ativo = linha.strip().split(";")
+            usuarios[telefone] = {
+                "chat_id": int(chat_id),
+                "ativo": ativo == "1"
+            }
+    return usuarios
 
 
-def enviar_alertas():
-    service = get_drive_service()
-    ultimo_id = get_ultimo_id_processado()
+def salvar_usuarios(usuarios):
+    garantir_pasta_estado()
+    with open(USUARIOS_ARQUIVO, "w") as f:
+        for telefone, dados in usuarios.items():
+            ativo = "1" if dados["ativo"] else "0"
+            f.write(f"{dados['chat_id']};{telefone};{ativo}\n")
 
-    arquivo = get_arquivo_mais_recente(service)
-    if not arquivo:
-        print("Nenhum arquivo encontrado.")
-        return
+# =========================================================
+# GOOGLE DRIVE
+# =========================================================
 
-    if arquivo["id"] == ultimo_id:
-        print("Arquivo já processado.")
-        return
-
-    baixar_excel(service, arquivo["id"])
-
-    df = pd.read_excel("alerta.xlsx")
-
-    for _, row in df.iterrows():
-        chat_id = str(row["Fone"]).strip()
-        texto = str(row["Texto"]).strip()
-        bot.send_message(chat_id=chat_id, text=texto)
-
-    salvar_ultimo_id(arquivo["id"])
-    print("Alertas enviados com sucesso.")
-
-
-if __name__ == "__main__":
-    enviar_alertas()
+def obter_drive_service():
+    creds = service_account_
