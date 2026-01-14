@@ -72,13 +72,18 @@ def salvar_usuarios(usuarios):
 
 
 def obter_drive_service():
-    # Definimos o escopo explicitamente
+    import google.auth
+    from googleapiclient.discovery import build
+
+    # Escopo explícito de leitura do Drive
     scopes = ["https://www.googleapis.com/auth/drive.readonly"]
     
-    # Carrega as credenciais da VM com o escopo correto
-    creds, project = google.auth.default(scopes=scopes)
+    # Criamos as credenciais garantindo que o escopo seja aplicado
+    creds, project = google.auth.default()
+    if creds.requires_scopes:
+        creds = creds.with_scopes(scopes)
     
-    # Criamos o serviço. O discoveryServiceUrl evita alguns avisos de timeout
+    # Construímos o serviço com discovery estático desativado para evitar erros de timeout
     return build("drive", "v3", credentials=creds, static_discovery=False)
 
 async def enviar_alertas(context: ContextTypes.DEFAULT_TYPE = None):
