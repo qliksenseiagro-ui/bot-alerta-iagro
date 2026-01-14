@@ -2,6 +2,7 @@ import os
 import json
 import asyncio
 import pandas as pd
+import google.auth
 from dotenv import load_dotenv
 from telegram import Bot, Update
 from telegram.ext import (
@@ -68,13 +69,17 @@ def salvar_usuarios(usuarios):
 # INTEGRAÇÃO GOOGLE DRIVE
 # ======================================================
 
-import google.auth # Adicione este import no topo do arquivo com os outros
+
 
 def obter_drive_service():
-    # Esta função agora usa a identidade da própria VM do Google Cloud
+    # Definimos o escopo explicitamente
     scopes = ["https://www.googleapis.com/auth/drive.readonly"]
+    
+    # Carrega as credenciais da VM com o escopo correto
     creds, project = google.auth.default(scopes=scopes)
-    return build("drive", "v3", credentials=creds)
+    
+    # Criamos o serviço. O discoveryServiceUrl evita alguns avisos de timeout
+    return build("drive", "v3", credentials=creds, static_discovery=False)
 
 async def enviar_alertas(context: ContextTypes.DEFAULT_TYPE = None):
     """Função que verifica o Drive e envia mensagens"""
