@@ -68,18 +68,12 @@ def salvar_usuarios(usuarios):
 # INTEGRAÇÃO GOOGLE DRIVE
 # ======================================================
 
+import google.auth # Adicione este import no topo do arquivo com os outros
+
 def obter_drive_service():
-    # Tenta carregar do JSON na variável de ambiente, se falhar, tenta arquivo físico
-    try:
-        info = json.loads(GOOGLE_SERVICE_ACCOUNT_JSON)
-        creds = service_account.Credentials.from_service_account_info(
-            info, scopes=["https://www.googleapis.com/auth/drive.readonly"]
-        )
-    except Exception:
-        # Fallback para arquivo físico caso prefira deixar o service_account.json na pasta
-        creds = service_account.Credentials.from_service_account_file(
-            "service_account.json", scopes=["https://www.googleapis.com/auth/drive.readonly"]
-        )
+    # Esta função agora usa a identidade da própria VM do Google Cloud
+    scopes = ["https://www.googleapis.com/auth/drive.readonly"]
+    creds, project = google.auth.default(scopes=scopes)
     return build("drive", "v3", credentials=creds)
 
 async def enviar_alertas(context: ContextTypes.DEFAULT_TYPE = None):
